@@ -20,10 +20,24 @@ import (
 	"unsafe"
 )
 
-// Frame represents a dirty rectangle update encoded as JPEG.
+// Frame types for wire protocol
+const (
+	FrameTypeJPEG = 0x00
+	FrameTypeH264 = 0x01
+)
+
+// Pool for JPEG encode buffers to reduce GC pressure
+var jpegBufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
+
+// Frame represents a dirty rectangle update encoded as JPEG or raw H.264.
 type Frame struct {
+	Type        uint8  // FrameTypeJPEG or FrameTypeH264
 	X, Y, W, H int
-	JPEG        []byte // JPEG-encoded pixel data
+	Data        []byte // JPEG or H.264 NAL unit payload
 }
 
 // Connection represents an active RDP session backed by FreeRDP.
@@ -186,20 +200,28 @@ func goEndPaint(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 		}
 	}
 
-	// JPEG encode
-	var buf bytes.Buffer
-	err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 65})
+	// JPEG encode using pooled buffer
+	buf := jpegBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	err := jpeg.Encode(buf, img, &jpeg.Options{Quality: 65})
 	if err != nil {
+		jpegBufPool.Put(buf)
 		return
 	}
 
+	// Copy from pooled buffer so we can return it immediately
+	jpegBytes := make([]byte, buf.Len())
+	copy(jpegBytes, buf.Bytes())
+	jpegBufPool.Put(buf)
+
 	// Non-blocking send to frame channel
 	frame := Frame{
+		Type: FrameTypeJPEG,
 		X:    goX,
 		Y:    goY,
 		W:    goW,
 		H:    goH,
-		JPEG: buf.Bytes(),
+		Data: jpegBytes,
 	}
 
 	select {

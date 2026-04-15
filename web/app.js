@@ -3,6 +3,8 @@
  *
  * Handles: WebSocket lifecycle, authentication, canvas rendering,
  * keyboard/mouse event capture and forwarding.
+ * Phase 2: FPS counter, fullscreen, keyboard shortcuts, rAF batching,
+ * mouse throttling, H.264 WebCodecs support.
  */
 
 (function () {
@@ -25,10 +27,15 @@
     const rdpScreen = document.getElementById('rdp-screen');
     const canvas = document.getElementById('rdp-canvas');
     const ctx = canvas.getContext('2d');
+    const statusBar = document.getElementById('status-bar');
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
     const resolutionText = document.getElementById('resolution-text');
     const disconnectBtn = document.getElementById('disconnect-btn');
+    const fullscreenBtn = document.getElementById('fullscreen-btn');
+    const fpsToggleBtn = document.getElementById('fps-toggle-btn');
+    const fpsOverlay = document.getElementById('fps-overlay');
+    const fpsText = document.getElementById('fps-text');
 
     // ========================================
     // State
@@ -39,6 +46,27 @@
     let remoteWidth = 1920;
     let remoteHeight = 1080;
 
+    // FPS tracking
+    let frameCount = 0;
+    let fpsVisible = false;
+    let fpsInterval = null;
+
+    // Fullscreen
+    let isFullscreen = false;
+    let toolbarTimeout = null;
+
+    // Frame batching (rAF)
+    let pendingFrames = [];
+    let rafId = null;
+
+    // Mouse throttling
+    let lastMouseSendTime = 0;
+    const MOUSE_THROTTLE_MS = 16; // ~60 events/sec
+
+    // H.264 WebCodecs
+    let h264Decoder = null;
+    let webCodecsSupported = (typeof VideoDecoder !== 'undefined');
+
     // ========================================
     // Scancode Mapping (event.code → AT-101 scancode)
     // ========================================
@@ -47,7 +75,7 @@
         'Escape': 0x01, 'Digit1': 0x02, 'Digit2': 0x03, 'Digit3': 0x04,
         'Digit4': 0x05, 'Digit5': 0x06, 'Digit6': 0x07, 'Digit7': 0x08,
         'Digit8': 0x09, 'Digit9': 0x0A, 'Digit0': 0x0B, 'Minus': 0x0C,
-        'Equal': 0x0D, 'Backspace': 0x0E, 'Tab': 0x09,
+        'Equal': 0x0D, 'Backspace': 0x0E, 'Tab': 0x0F,
         'KeyQ': 0x10, 'KeyW': 0x11, 'KeyE': 0x12, 'KeyR': 0x13,
         'KeyT': 0x14, 'KeyY': 0x15, 'KeyU': 0x16, 'KeyI': 0x17,
         'KeyO': 0x18, 'KeyP': 0x19, 'BracketLeft': 0x1A, 'BracketRight': 0x1B,
@@ -101,6 +129,10 @@
     const KBD_FLAGS_RELEASE  = 0x8000;
     const KBD_FLAGS_EXTENDED = 0x0100;
 
+    // Frame type constants
+    const FRAME_TYPE_JPEG = 0x00;
+    const FRAME_TYPE_H264 = 0x01;
+
     // ========================================
     // WebSocket
     // ========================================
@@ -123,7 +155,6 @@
             console.log('WebSocket connected');
             // Send the browser's available viewport dimensions so RDP matches
             const wrapper = document.querySelector('.canvas-wrapper');
-            const statusBar = document.getElementById('status-bar');
             const availW = wrapper ? wrapper.clientWidth : window.innerWidth;
             const availH = wrapper ? wrapper.clientHeight : (window.innerHeight - (statusBar ? statusBar.offsetHeight : 30));
             // Round to even for codec compatibility
@@ -190,6 +221,14 @@
         canvas.height = remoteHeight;
         resolutionText.textContent = remoteWidth + '×' + remoteHeight;
 
+        // Initialize H.264 decoder if supported
+        if (webCodecsSupported) {
+            initH264Decoder();
+        }
+
+        // Start FPS counter
+        startFpsCounter();
+
         // Transition to RDP screen
         loginScreen.classList.add('hiding');
         setTimeout(function () {
@@ -220,26 +259,184 @@
     }
 
     // ========================================
-    // Frame Rendering
+    // H.264 WebCodecs Decoder
+    // ========================================
+
+    function initH264Decoder() {
+        if (!webCodecsSupported) return;
+
+        try {
+            h264Decoder = new VideoDecoder({
+                output: function (frame) {
+                    // Draw the decoded video frame on canvas
+                    ctx.drawImage(frame, 0, 0, remoteWidth, remoteHeight);
+                    frame.close();
+                },
+                error: function (err) {
+                    console.error('H.264 decode error:', err);
+                    // Fall back to JPEG-only mode
+                    h264Decoder = null;
+                }
+            });
+
+            // Configure for H.264 Baseline Profile
+            h264Decoder.configure({
+                codec: 'avc1.42E01E', // Baseline Level 3.0
+                optimizeForLatency: true,
+            });
+
+            console.log('WebCodecs H.264 decoder initialized');
+        } catch (e) {
+            console.warn('WebCodecs not available, using JPEG fallback:', e);
+            h264Decoder = null;
+        }
+    }
+
+    function cleanupH264Decoder() {
+        if (h264Decoder) {
+            try { h264Decoder.close(); } catch(e) { /* ignore */ }
+            h264Decoder = null;
+        }
+    }
+
+    // ========================================
+    // Frame Rendering (with rAF batching)
     // ========================================
 
     function handleFrame(buffer) {
-        // Binary frame format: [2B x][2B y][2B w][2B h][JPEG payload]
-        // All uint16 little-endian
-        const header = new DataView(buffer, 0, 8);
-        const x = header.getUint16(0, true);
-        const y = header.getUint16(2, true);
-        const w = header.getUint16(4, true);
-        const h = header.getUint16(6, true);
-        const jpegData = new Uint8Array(buffer, 8);
+        frameCount++;
 
-        const blob = new Blob([jpegData], { type: 'image/jpeg' });
-        createImageBitmap(blob).then(function (bitmap) {
-            ctx.drawImage(bitmap, x, y, w, h);
-            bitmap.close();
-        }).catch(function (err) {
-            console.error('Frame decode error:', err);
-        });
+        // Check header format: new 9-byte header with type, or legacy 8-byte
+        var headerSize, frameType;
+        var view = new DataView(buffer);
+
+        if (buffer.byteLength > 9) {
+            // New format: [1B type][2B x][2B y][2B w][2B h][payload]
+            frameType = view.getUint8(0);
+            headerSize = 9;
+            if (frameType !== FRAME_TYPE_JPEG && frameType !== FRAME_TYPE_H264) {
+                // Legacy 8-byte format (type byte looks like high byte of x coordinate)
+                frameType = FRAME_TYPE_JPEG;
+                headerSize = 8;
+            }
+        } else {
+            // Legacy 8-byte format
+            frameType = FRAME_TYPE_JPEG;
+            headerSize = 8;
+        }
+
+        if (frameType === FRAME_TYPE_H264 && h264Decoder && h264Decoder.state === 'configured') {
+            // H.264 passthrough: decode via WebCodecs GPU
+            var h264Data = new Uint8Array(buffer, headerSize);
+            try {
+                var chunk = new EncodedVideoChunk({
+                    type: 'key', // Treat all as keyframes for simplicity; real impl checks NAL type
+                    timestamp: performance.now() * 1000,
+                    data: h264Data
+                });
+                h264Decoder.decode(chunk);
+            } catch (e) {
+                console.error('H.264 chunk error:', e);
+            }
+            return;
+        }
+
+        // JPEG path: queue for rAF batch rendering
+        var offset = (headerSize === 9) ? 1 : 0;
+        var x = view.getUint16(offset, true);
+        var y = view.getUint16(offset + 2, true);
+        var w = view.getUint16(offset + 4, true);
+        var h = view.getUint16(offset + 6, true);
+        var jpegData = new Uint8Array(buffer, headerSize);
+
+        pendingFrames.push({ x: x, y: y, w: w, h: h, jpeg: jpegData });
+
+        // Schedule rAF if not already pending
+        if (!rafId) {
+            rafId = requestAnimationFrame(flushFrames);
+        }
+    }
+
+    function flushFrames() {
+        rafId = null;
+        var frames = pendingFrames;
+        pendingFrames = [];
+
+        for (var i = 0; i < frames.length; i++) {
+            var f = frames[i];
+            var blob = new Blob([f.jpeg], { type: 'image/jpeg' });
+            // Use IIFE to capture f in closure
+            (function(x, y, w, h) {
+                createImageBitmap(blob).then(function (bitmap) {
+                    ctx.drawImage(bitmap, x, y, w, h);
+                    bitmap.close();
+                }).catch(function (err) {
+                    console.error('Frame decode error:', err);
+                });
+            })(f.x, f.y, f.w, f.h);
+        }
+    }
+
+    // ========================================
+    // FPS Counter
+    // ========================================
+
+    function startFpsCounter() {
+        frameCount = 0;
+        if (fpsInterval) clearInterval(fpsInterval);
+        fpsInterval = setInterval(function () {
+            if (fpsVisible) {
+                fpsText.textContent = frameCount + ' FPS';
+            }
+            frameCount = 0;
+        }, 1000);
+    }
+
+    function stopFpsCounter() {
+        if (fpsInterval) {
+            clearInterval(fpsInterval);
+            fpsInterval = null;
+        }
+    }
+
+    function toggleFps() {
+        fpsVisible = !fpsVisible;
+        fpsOverlay.hidden = !fpsVisible;
+        fpsToggleBtn.classList.toggle('active', fpsVisible);
+    }
+
+    // ========================================
+    // Fullscreen
+    // ========================================
+
+    function toggleFullscreen() {
+        if (!document.fullscreenElement) {
+            rdpScreen.requestFullscreen().catch(function (e) {
+                console.warn('Fullscreen failed:', e);
+            });
+        } else {
+            document.exitFullscreen();
+        }
+    }
+
+    function onFullscreenChange() {
+        isFullscreen = !!document.fullscreenElement;
+        rdpScreen.classList.toggle('is-fullscreen', isFullscreen);
+        if (isFullscreen) {
+            showToolbarTemporarily();
+        } else {
+            clearTimeout(toolbarTimeout);
+            statusBar.classList.remove('toolbar-visible');
+        }
+        canvas.focus();
+    }
+
+    function showToolbarTemporarily() {
+        statusBar.classList.add('toolbar-visible');
+        clearTimeout(toolbarTimeout);
+        toolbarTimeout = setTimeout(function () {
+            statusBar.classList.remove('toolbar-visible');
+        }, 3000);
     }
 
     // ========================================
@@ -248,6 +445,32 @@
 
     function handleKeyEvent(event, isDown) {
         if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        // Intercept app keyboard shortcuts (Ctrl+Shift+Key)
+        if (event.ctrlKey && event.shiftKey) {
+            if (isDown) {
+                switch (event.code) {
+                    case 'KeyF':
+                        event.preventDefault();
+                        toggleFullscreen();
+                        return;
+                    case 'KeyD':
+                        event.preventDefault();
+                        handleDisconnect('User disconnected');
+                        return;
+                    case 'KeyP':
+                        event.preventDefault();
+                        toggleFps();
+                        return;
+                }
+            } else {
+                // Suppress keyup for consumed shortcuts
+                if (event.code === 'KeyF' || event.code === 'KeyD' || event.code === 'KeyP') {
+                    event.preventDefault();
+                    return;
+                }
+            }
+        }
 
         let scancode;
         let flags = isDown ? 0 : KBD_FLAGS_RELEASE;
@@ -272,7 +495,7 @@
     }
 
     // ========================================
-    // Input Handling — Mouse
+    // Input Handling — Mouse (with throttling)
     // ========================================
 
     function getCanvasCoords(event) {
@@ -294,6 +517,13 @@
             y: Math.max(0, Math.min(pos.y, remoteHeight - 1)),
             flags: flags
         }));
+    }
+
+    function sendMouseThrottled(flags, event) {
+        var now = performance.now();
+        if (now - lastMouseSendTime < MOUSE_THROTTLE_MS) return;
+        lastMouseSendTime = now;
+        sendMouse(flags, event);
     }
 
     function buttonToFlag(button) {
@@ -341,6 +571,20 @@
             ws.close();
             ws = null;
         }
+
+        cleanupH264Decoder();
+        stopFpsCounter();
+        if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+        pendingFrames = [];
+
+        // Exit fullscreen if active
+        if (document.fullscreenElement) {
+            document.exitFullscreen().catch(function() {});
+        }
+
         setStatus('disconnected', 'Disconnected');
         // Show login screen after a brief delay
         setTimeout(function () {
@@ -381,13 +625,38 @@
         handleDisconnect('User disconnected');
     });
 
+    // Fullscreen button
+    fullscreenBtn.addEventListener('click', function () {
+        toggleFullscreen();
+        canvas.focus();
+    });
+
+    // FPS toggle button
+    fpsToggleBtn.addEventListener('click', function () {
+        toggleFps();
+        canvas.focus();
+    });
+
+    // Fullscreen change event
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+
+    // Auto-show toolbar when mouse near bottom in fullscreen
+    document.addEventListener('mousemove', function (e) {
+        if (isFullscreen && connected) {
+            var h = window.innerHeight;
+            if (e.clientY > h - 50) {
+                showToolbarTemporarily();
+            }
+        }
+    });
+
     // Canvas keyboard events
     canvas.addEventListener('keydown', function (e) { handleKeyEvent(e, true); });
     canvas.addEventListener('keyup', function (e) { handleKeyEvent(e, false); });
 
-    // Canvas mouse events
+    // Canvas mouse events (with throttling for mousemove)
     canvas.addEventListener('mousemove', function (e) {
-        sendMouse(PTR_FLAGS_MOVE, e);
+        sendMouseThrottled(PTR_FLAGS_MOVE, e);
     });
 
     canvas.addEventListener('mousedown', function (e) {

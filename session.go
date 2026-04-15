@@ -177,18 +177,20 @@ func (s *Session) relayFrames() {
 }
 
 // sendFrame encodes a frame as a binary message:
-// [2B x][2B y][2B w][2B h][JPEG payload]
+// [1B type][2B x][2B y][2B w][2B h][payload]
+// type: 0x00 = JPEG, 0x01 = H.264 NAL unit
 // All uint16 values in little-endian.
 func (s *Session) sendFrame(frame rdp.Frame) {
-	header := make([]byte, 8)
-	binary.LittleEndian.PutUint16(header[0:2], uint16(frame.X))
-	binary.LittleEndian.PutUint16(header[2:4], uint16(frame.Y))
-	binary.LittleEndian.PutUint16(header[4:6], uint16(frame.W))
-	binary.LittleEndian.PutUint16(header[6:8], uint16(frame.H))
+	header := make([]byte, 9)
+	header[0] = frame.Type
+	binary.LittleEndian.PutUint16(header[1:3], uint16(frame.X))
+	binary.LittleEndian.PutUint16(header[3:5], uint16(frame.Y))
+	binary.LittleEndian.PutUint16(header[5:7], uint16(frame.W))
+	binary.LittleEndian.PutUint16(header[7:9], uint16(frame.H))
 
-	data := make([]byte, 8+len(frame.JPEG))
-	copy(data[0:8], header)
-	copy(data[8:], frame.JPEG)
+	data := make([]byte, 9+len(frame.Data))
+	copy(data[0:9], header)
+	copy(data[9:], frame.Data)
 
 	s.sendBinary(data)
 }

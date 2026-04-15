@@ -60,6 +60,10 @@
         <div class="canvas-wrapper">
             <canvas id="rdp-canvas" tabindex="0"></canvas>
         </div>
+        <!-- FPS overlay — togglable, very light -->
+        <div id="fps-overlay" class="fps-overlay" hidden>
+            <span id="fps-text">0 FPS</span>
+        </div>
         <div id="status-bar" class="status-bar">
             <div class="status-indicator">
                 <span id="status-dot" class="status-dot connected"></span>
@@ -67,12 +71,27 @@
             </div>
             <div class="status-info">
                 <span id="resolution-text">1920×1080</span>
-                <button id="disconnect-btn" class="btn-disconnect" title="Disconnect">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                        <line x1="18" y1="6" x2="6" y2="18"/>
-                        <line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
-                </button>
+                <div class="status-actions">
+                    <button id="fps-toggle-btn" class="btn-toolbar" title="Toggle FPS (Ctrl+Shift+P)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                        </svg>
+                    </button>
+                    <button id="fullscreen-btn" class="btn-toolbar" title="Fullscreen (Ctrl+Shift+F)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="15 3 21 3 21 9"/>
+                            <polyline points="9 21 3 21 3 15"/>
+                            <line x1="21" y1="3" x2="14" y2="10"/>
+                            <line x1="3" y1="21" x2="10" y2="14"/>
+                        </svg>
+                    </button>
+                    <button id="disconnect-btn" class="btn-disconnect" title="Disconnect (Ctrl+Shift+D)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
