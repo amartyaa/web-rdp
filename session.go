@@ -16,6 +16,9 @@ type ClientMessage struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 	Domain   string `json:"domain,omitempty"`
+	// Requested resolution (from auth message)
+	Width  int    `json:"width,omitempty"`
+	Height int    `json:"height,omitempty"`
 	// Keyboard
 	Code  uint16 `json:"code,omitempty"`
 	Flags uint16 `json:"flags,omitempty"`
@@ -93,7 +96,23 @@ func (s *Session) handleAuth(msg *ClientMessage) {
 		return
 	}
 
-	log.Printf("Auth received: user=%s domain=%s", msg.Username, msg.Domain)
+	log.Printf("Auth received: user=%s domain=%s requestedRes=%dx%d", msg.Username, msg.Domain, msg.Width, msg.Height)
+
+	// Use client-requested resolution, fall back to 1920x1080
+	reqW := msg.Width
+	reqH := msg.Height
+	if reqW <= 0 || reqH <= 0 {
+		reqW = 1920
+		reqH = 1080
+	}
+	// Clamp to reasonable bounds
+	if reqW < 800 { reqW = 800 }
+	if reqH < 600 { reqH = 600 }
+	if reqW > 3840 { reqW = 3840 }
+	if reqH > 2160 { reqH = 2160 }
+	// Ensure even dimensions (codec compatibility)
+	reqW = (reqW / 2) * 2
+	reqH = (reqH / 2) * 2
 
 	// Connect to local RDP service via FreeRDP
 	params := rdp.ConnectParams{
@@ -102,8 +121,8 @@ func (s *Session) handleAuth(msg *ClientMessage) {
 		Username: msg.Username,
 		Password: msg.Password,
 		Domain:   msg.Domain,
-		Width:    1920,
-		Height:   1080,
+		Width:    reqW,
+		Height:   reqH,
 	}
 
 	conn, err := rdp.Connect(params, s.frameCh,

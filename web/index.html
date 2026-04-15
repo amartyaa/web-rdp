@@ -57,7 +57,9 @@
 
     <!-- RDP Canvas Screen -->
     <div id="rdp-screen" class="rdp-screen" hidden>
-        <canvas id="rdp-canvas" tabindex="0"></canvas>
+        <div class="canvas-wrapper">
+            <canvas id="rdp-canvas" tabindex="0"></canvas>
+        </div>
         <div id="status-bar" class="status-bar">
             <div class="status-indicator">
                 <span id="status-dot" class="status-dot connected"></span>

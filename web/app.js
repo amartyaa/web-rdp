@@ -121,12 +121,22 @@
 
         ws.onopen = function () {
             console.log('WebSocket connected');
-            // Send auth credentials
+            // Send the browser's available viewport dimensions so RDP matches
+            const wrapper = document.querySelector('.canvas-wrapper');
+            const statusBar = document.getElementById('status-bar');
+            const availW = wrapper ? wrapper.clientWidth : window.innerWidth;
+            const availH = wrapper ? wrapper.clientHeight : (window.innerHeight - (statusBar ? statusBar.offsetHeight : 30));
+            // Round to even for codec compatibility
+            const reqW = Math.floor(availW / 2) * 2;
+            const reqH = Math.floor(availH / 2) * 2;
+
             ws.send(JSON.stringify({
                 type: 'auth',
                 username: username,
                 password: password,
-                domain: domain || ''
+                domain: domain || '',
+                width: reqW,
+                height: reqH
             }));
         };
 
