@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="VCollab Web RDP Client — Access your remote desktop from the browser">
+    <title>VCollab — Web RDP</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="login-screen" class="login-screen">
+        <div class="login-backdrop"></div>
+        <div class="login-card">
+            <div class="login-header">
+                <div class="login-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                        <line x1="8" y1="21" x2="16" y2="21"/>
+                        <line x1="12" y1="17" x2="12" y2="21"/>
+                    </svg>
+                </div>
+                <h1>Remote Desktop</h1>
+                <p class="login-subtitle">Connect to your workspace</p>
+            </div>
+            <form id="login-form" autocomplete="off">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required
+                           placeholder="e.g. administrator" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required
+                           placeholder="••••••••" autocomplete="current-password">
+                </div>
+                <div class="form-group">
+                    <label for="domain">Domain <span class="optional">(optional)</span></label>
+                    <input type="text" id="domain" name="domain"
+                           placeholder="e.g. CORP">
+                </div>
+                <button type="submit" id="connect-btn" class="btn-connect">
+                    <span class="btn-text">Connect</span>
+                    <span class="btn-spinner" hidden>
+                        <svg class="spinner" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="31.4 31.4"/>
+                        </svg>
+                    </span>
+                </button>
+            </form>
+            <div id="login-error" class="login-error" hidden></div>
+        </div>
+    </div>
+
+    <!-- RDP Canvas Screen -->
+    <div id="rdp-screen" class="rdp-screen" hidden>
+        <canvas id="rdp-canvas" tabindex="0"></canvas>
+        <div id="status-bar" class="status-bar">
+            <div class="status-indicator">
+                <span id="status-dot" class="status-dot connected"></span>
+                <span id="status-text">Connected</span>
+            </div>
+            <div class="status-info">
+                <span id="resolution-text">1920×1080</span>
+                <button id="disconnect-btn" class="btn-disconnect" title="Disconnect">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

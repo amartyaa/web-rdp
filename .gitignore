@@ -1,0 +1,7 @@
+# # Build output
+# dist/
+# *.exe
+
+# OS
+.DS_Store
+Thumbs.db
