@@ -5,6 +5,8 @@
 #include <freerdp/client.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/channels/channels.h>
+#include <freerdp/channels/rdpgfx.h>
+#include <freerdp/client/rdpgfx.h>
 #include <freerdp/codec/color.h>
 #include <winpr/synch.h>
 #include <winpr/thread.h>
@@ -16,6 +18,10 @@ typedef struct {
     rdpClientContext clientContext;
     uintptr_t       goHandle;    /* cgo.Handle for routing callbacks to Go */
     int             desktopReady;
+
+    /* GFX pipeline H.264 interception */
+    RdpgfxClientContext* gfxContext;                    /* saved GFX context pointer */
+    pcRdpgfxSurfaceCommand origSurfaceCommand;          /* original GDI SurfaceCommand handler */
 } BridgeContext;
 
 /* Connection parameters passed from Go to C. */
@@ -77,5 +83,10 @@ extern void goEndPaint(uintptr_t handle,
 extern void goOnReady(uintptr_t handle, int width, int height);
 
 extern void goOnDisconnect(uintptr_t handle, int errorCode);
+
+/* H.264 passthrough: sends raw H.264 NAL unit data directly to Go */
+extern void goH264Frame(uintptr_t handle,
+                        uint8_t* data, int dataLen,
+                        int x, int y, int w, int h);
 
 #endif /* FREERDP_BRIDGE_H */

@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"image/png"
+	"log"
 	"runtime"
 	"runtime/cgo"
 	"sync"
@@ -25,6 +27,7 @@ import (
 const (
 	FrameTypeJPEG = 0x00
 	FrameTypeH264 = 0x01
+	FrameTypePNG  = 0x02
 )
 
 // Pool for JPEG encode buffers to reduce GC pressure
@@ -61,6 +64,7 @@ type Connection struct {
 	onReady     func(width, height int)
 	onClosed    func(errCode int)
 	jpegQuality atomic.Int32 // JPEG quality 1-100
+	h264Logged  atomic.Bool  // true after first H.264 frame log
 }
 
 // ConnectParams holds the parameters for establishing an RDP connection.
@@ -237,37 +241,88 @@ func goEndPaint(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 		Rect:   image.Rect(0, 0, goW, goH),
 	}
 
-	// JPEG encode using pooled buffer
+	// Encode using pooled buffer: PNG (lossless) for quality >= 95, JPEG otherwise
 	quality := int(conn.jpegQuality.Load())
 	if quality < 1 || quality > 100 {
 		quality = 75
 	}
-	jbuf := jpegBufPool.Get().(*bytes.Buffer)
-	jbuf.Reset()
-	err := jpeg.Encode(jbuf, img, &jpeg.Options{Quality: quality})
+
+	ebuf := jpegBufPool.Get().(*bytes.Buffer)
+	ebuf.Reset()
+
+	var frameType uint8
+	var encodeErr error
+
+	if quality >= 95 {
+		// PNG: lossless, crisp text and edges
+		frameType = FrameTypePNG
+		encodeErr = png.Encode(ebuf, img)
+	} else {
+		// JPEG: lossy, lower bandwidth
+		frameType = FrameTypeJPEG
+		encodeErr = jpeg.Encode(ebuf, img, &jpeg.Options{Quality: quality})
+	}
 
 	// Return pixel buffer to pool immediately
 	*pbufPtr = pbuf
 	pixelBufPool.Put(pbufPtr)
 
-	if err != nil {
-		jpegBufPool.Put(jbuf)
+	if encodeErr != nil {
+		jpegBufPool.Put(ebuf)
 		return
 	}
 
 	// Copy from pooled buffer so we can return it immediately
-	jpegBytes := make([]byte, jbuf.Len())
-	copy(jpegBytes, jbuf.Bytes())
-	jpegBufPool.Put(jbuf)
+	encoded := make([]byte, ebuf.Len())
+	copy(encoded, ebuf.Bytes())
+	jpegBufPool.Put(ebuf)
 
 	// Non-blocking send to frame channel
 	frame := Frame{
-		Type: FrameTypeJPEG,
+		Type: frameType,
 		X:    goX,
 		Y:    goY,
 		W:    goW,
 		H:    goH,
-		Data: jpegBytes,
+		Data: encoded,
+	}
+
+	select {
+	case conn.frameCh <- frame:
+	default:
+		// Drop frame if channel is full (backpressure)
+	}
+}
+
+//export goH264Frame
+func goH264Frame(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
+	x, y, w, h C.int) {
+
+	conn := cgo.Handle(handle).Value().(*Connection)
+
+	goLen := int(dataLen)
+	if goLen <= 0 {
+		return
+	}
+
+	// Copy H.264 NAL data from C memory
+	nalData := make([]byte, goLen)
+	copy(nalData, unsafe.Slice((*byte)(unsafe.Pointer(data)), goLen))
+
+	// Log first H.264 frame
+	if !conn.h264Logged.Load() {
+		conn.h264Logged.Store(true)
+		log.Printf("[H.264] First H.264 frame received: %dx%d at (%d,%d), %d bytes NAL",
+			int(w), int(h), int(x), int(y), goLen)
+	}
+
+	frame := Frame{
+		Type: FrameTypeH264,
+		X:    int(x),
+		Y:    int(y),
+		W:    int(w),
+		H:    int(h),
+		Data: nalData,
 	}
 
 	select {

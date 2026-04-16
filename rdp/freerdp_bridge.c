@@ -119,30 +119,137 @@ static BOOL bridge_desktop_resize(rdpContext* context)
 }
 
 /* ============================================
+   GFX Pipeline — H.264 Interception
+   ============================================ */
+
+/*
+ * bridge_gfx_surface_command: Intercepts GFX SurfaceCommand.
+ * If the codec is AVC420/AVC444/AVC444v2, extract the raw H.264 NAL data
+ * and forward it directly to Go (goH264Frame). The browser will decode
+ * it via WebCodecs GPU — no re-encoding needed.
+ * For all other codecs, fall through to the original GDI pipeline handler.
+ */
+static UINT bridge_gfx_surface_command(RdpgfxClientContext* gfxContext,
+                                        const RDPGFX_SURFACE_COMMAND* cmd)
+{
+    /*
+     * gdi_graphics_pipeline_init sets gfxContext->custom = gdi (rdpGdi*).
+     * We need gdi->context to get back to our BridgeContext.
+     */
+    rdpGdi* gdi = (rdpGdi*)gfxContext->custom;
+    rdpContext* ctx = gdi->context;
+    BridgeContext* bc = (BridgeContext*)ctx;
+
+    if (!cmd)
+        goto fallback;
+
+    /* Check for H.264 codecs */
+    if (cmd->codecId == RDPGFX_CODECID_AVC420 ||
+        cmd->codecId == RDPGFX_CODECID_AVC444 ||
+        cmd->codecId == RDPGFX_CODECID_AVC444v2)
+    {
+        /*
+         * For AVC420: cmd->extra points to RDPGFX_AVC420_BITMAP_STREAM
+         * which contains meta + H.264 NAL data.
+         * For AVC444/v2: cmd->extra points to RDPGFX_AVC444_BITMAP_STREAM
+         * which contains two AVC420 bitstreams.
+         *
+         * The simplest approach: use cmd->data and cmd->length which contain
+         * the raw wire bytes for the codec payload. We forward the entire
+         * payload to Go, and the browser will parse/decode it.
+         *
+         * Actually, the cleanest H.264 data is in the AVC420 bitstream's
+         * data pointer. Let's extract that.
+         */
+        if (cmd->codecId == RDPGFX_CODECID_AVC420 && cmd->extra)
+        {
+            RDPGFX_AVC420_BITMAP_STREAM* avc420 =
+                (RDPGFX_AVC420_BITMAP_STREAM*)cmd->extra;
+            if (avc420->data && avc420->length > 0)
+            {
+                goH264Frame(bc->goHandle,
+                            avc420->data, (int)avc420->length,
+                            (int)cmd->left, (int)cmd->top,
+                            (int)cmd->width, (int)cmd->height);
+                return CHANNEL_RC_OK;
+            }
+        }
+        else if ((cmd->codecId == RDPGFX_CODECID_AVC444 ||
+                  cmd->codecId == RDPGFX_CODECID_AVC444v2) && cmd->extra)
+        {
+            /*
+             * AVC444: two AVC420 bitstreams. The first (bitstream[0]) is the
+             * main view. Forward that.
+             */
+            RDPGFX_AVC444_BITMAP_STREAM* avc444 =
+                (RDPGFX_AVC444_BITMAP_STREAM*)cmd->extra;
+            if (avc444->bitstream[0].data && avc444->bitstream[0].length > 0)
+            {
+                goH264Frame(bc->goHandle,
+                            avc444->bitstream[0].data,
+                            (int)avc444->bitstream[0].length,
+                            (int)cmd->left, (int)cmd->top,
+                            (int)cmd->width, (int)cmd->height);
+                return CHANNEL_RC_OK;
+            }
+        }
+
+        /* If we couldn't extract H.264 data, fall through to GDI decode */
+    }
+
+fallback:
+    /* Non-H.264 codecs: let the original GDI pipeline handle it */
+    if (bc->origSurfaceCommand)
+        return bc->origSurfaceCommand(gfxContext, cmd);
+
+    return CHANNEL_RC_OK;
+}
+
+/* ============================================
    Channel Event Handlers
    ============================================ */
 
 static void bridge_on_channel_connected(void* context, const ChannelConnectedEventArgs* e)
 {
     rdpContext* ctx = (rdpContext*)context;
+    BridgeContext* bc = (BridgeContext*)ctx;
     WINPR_ASSERT(ctx);
     WINPR_ASSERT(e);
 
     if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
     {
-        gdi_graphics_pipeline_init(ctx->gdi, (RdpgfxClientContext*)e->pInterface);
+        RdpgfxClientContext* gfxCtx = (RdpgfxClientContext*)e->pInterface;
+
+        /* Let GDI initialize the full pipeline (surfaces, cache, etc.) */
+        gdi_graphics_pipeline_init(ctx->gdi, gfxCtx);
+
+        /* Save the GDI's SurfaceCommand handler and replace with our hook */
+        bc->gfxContext = gfxCtx;
+        bc->origSurfaceCommand = gfxCtx->SurfaceCommand;
+        gfxCtx->SurfaceCommand = bridge_gfx_surface_command;
     }
 }
 
 static void bridge_on_channel_disconnected(void* context, const ChannelDisconnectedEventArgs* e)
 {
     rdpContext* ctx = (rdpContext*)context;
+    BridgeContext* bc = (BridgeContext*)ctx;
     WINPR_ASSERT(ctx);
     WINPR_ASSERT(e);
 
     if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
     {
-        gdi_graphics_pipeline_uninit(ctx->gdi, (RdpgfxClientContext*)e->pInterface);
+        RdpgfxClientContext* gfxCtx = (RdpgfxClientContext*)e->pInterface;
+
+        /* Restore original handler before uninit */
+        if (bc->origSurfaceCommand)
+        {
+            gfxCtx->SurfaceCommand = bc->origSurfaceCommand;
+            bc->origSurfaceCommand = NULL;
+        }
+        bc->gfxContext = NULL;
+
+        gdi_graphics_pipeline_uninit(ctx->gdi, gfxCtx);
     }
 }
 
@@ -305,6 +412,8 @@ rdpContext* bridge_connect(BridgeConnParams* params)
     bc = (BridgeContext*)context;
     bc->goHandle = params->goHandle;
     bc->desktopReady = 0;
+    bc->gfxContext = NULL;
+    bc->origSurfaceCommand = NULL;
 
     settings = context->settings;
 

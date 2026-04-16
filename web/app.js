@@ -43,6 +43,8 @@
     const clipboardBtn = document.getElementById('clipboard-btn');
     const altTabBtn = document.getElementById('alttab-btn');
     const cadBtn = document.getElementById('cad-btn');
+    const fullscreenConnectCb = document.getElementById('fullscreen-connect');
+    const codecIndicator = document.getElementById('codec-indicator');
 
     // ========================================
     // State
@@ -65,6 +67,12 @@
     // Mouse throttling
     let lastMouseSendTime = 0;
     const MOUSE_THROTTLE_MS = 16; // ~60 events/sec
+
+    // Codec tracking
+    let h264FrameCount = 0;
+    let jpegFrameCount = 0;
+    let pngFrameCount = 0;
+    let codecLogged = false;
 
     // H.264 WebCodecs
     let h264Decoder = null;
@@ -135,6 +143,7 @@
     // Frame type constants
     const FRAME_TYPE_JPEG = 0x00;
     const FRAME_TYPE_H264 = 0x01;
+    const FRAME_TYPE_PNG  = 0x02;
 
     // ========================================
     // WebSocket
@@ -265,32 +274,42 @@
     // H.264 WebCodecs Decoder
     // ========================================
 
+    // Pending H.264 region info (set before decode, read by output callback)
+    let h264PendingRegions = [];
+
     function initH264Decoder() {
         if (!webCodecsSupported) return;
 
         try {
             h264Decoder = new VideoDecoder({
                 output: function (frame) {
-                    // Draw the decoded video frame on canvas
-                    ctx.drawImage(frame, 0, 0, remoteWidth, remoteHeight);
+                    // Draw the decoded video frame at the correct dirty-rect position
+                    var region = h264PendingRegions.shift();
+                    if (region) {
+                        ctx.drawImage(frame, region.x, region.y, region.w, region.h);
+                    } else {
+                        // Fallback: if no region info, draw at origin
+                        ctx.drawImage(frame, 0, 0);
+                    }
                     frame.close();
                 },
                 error: function (err) {
                     console.error('H.264 decode error:', err);
-                    // Fall back to JPEG-only mode
+                    // Fall back to JPEG/PNG mode
                     h264Decoder = null;
+                    h264PendingRegions = [];
                 }
             });
 
-            // Configure for H.264 Baseline Profile
+            // Configure for H.264 Constrained Baseline (what RDP AVC420 uses)
             h264Decoder.configure({
-                codec: 'avc1.42E01E', // Baseline Level 3.0
+                codec: 'avc1.42C01E', // Constrained Baseline Level 3.0
                 optimizeForLatency: true,
             });
 
             console.log('WebCodecs H.264 decoder initialized');
         } catch (e) {
-            console.warn('WebCodecs not available, using JPEG fallback:', e);
+            console.warn('WebCodecs not available, using JPEG/PNG fallback:', e);
             h264Decoder = null;
         }
     }
@@ -300,6 +319,7 @@
             try { h264Decoder.close(); } catch(e) { /* ignore */ }
             h264Decoder = null;
         }
+        h264PendingRegions = [];
     }
 
     // ========================================
@@ -320,8 +340,16 @@
         var h = view.getUint16(7, true);
 
         if (frameType === FRAME_TYPE_H264 && h264Decoder && h264Decoder.state === 'configured') {
+            h264FrameCount++;
+            if (h264FrameCount === 1) {
+                console.log('%c[CODEC] First H.264 frame received — GPU-accelerated decode active', 'color: #22c55e; font-weight: bold');
+                updateCodecIndicator();
+            }
             var h264Data = new Uint8Array(buffer, 9);
             try {
+                // Queue region info so the output callback knows where to draw
+                h264PendingRegions.push({ x: x, y: y, w: w, h: h });
+
                 var chunk = new EncodedVideoChunk({
                     type: 'key',
                     timestamp: performance.now() * 1000,
@@ -330,13 +358,30 @@
                 h264Decoder.decode(chunk);
             } catch (e) {
                 console.error('H.264 chunk error:', e);
+                h264PendingRegions.pop(); // remove the queued region on error
             }
             return;
         }
 
-        // JPEG path: decode and draw immediately (no rAF batching — it adds latency)
-        var jpegData = new Uint8Array(buffer, 9);
-        var blob = new Blob([jpegData], { type: 'image/jpeg' });
+        // Track JPEG/PNG frames
+        if (frameType === FRAME_TYPE_PNG) {
+            pngFrameCount++;
+            if (pngFrameCount === 1) {
+                console.log('%c[CODEC] First PNG frame received — lossless mode', 'color: #3b82f6; font-weight: bold');
+                updateCodecIndicator();
+            }
+        } else {
+            jpegFrameCount++;
+            if (jpegFrameCount === 1) {
+                console.log('%c[CODEC] First JPEG frame received — lossy mode', 'color: #f59e0b; font-weight: bold');
+                updateCodecIndicator();
+            }
+        }
+
+        // Image path (JPEG or PNG): decode and draw immediately
+        var imageData = new Uint8Array(buffer, 9);
+        var mimeType = (frameType === FRAME_TYPE_PNG) ? 'image/png' : 'image/jpeg';
+        var blob = new Blob([imageData], { type: mimeType });
         createImageBitmap(blob).then(function (bitmap) {
             ctx.drawImage(bitmap, x, y, w, h);
             bitmap.close();
@@ -384,6 +429,35 @@
             });
         } else {
             document.exitFullscreen();
+        }
+    }
+
+    function updateCodecIndicator() {
+        if (!codecIndicator) return;
+        codecIndicator.hidden = false;
+        codecIndicator.className = 'codec-badge';
+
+        if (h264FrameCount > 0) {
+            codecIndicator.textContent = 'H.264';
+            codecIndicator.classList.add('codec-h264');
+        } else if (pngFrameCount > 0 && jpegFrameCount === 0) {
+            codecIndicator.textContent = 'PNG';
+            codecIndicator.classList.add('codec-png');
+        } else if (jpegFrameCount > 0) {
+            codecIndicator.textContent = 'JPEG';
+            codecIndicator.classList.add('codec-jpeg');
+        }
+    }
+
+    function resetCodecCounters() {
+        h264FrameCount = 0;
+        jpegFrameCount = 0;
+        pngFrameCount = 0;
+        codecLogged = false;
+        if (codecIndicator) {
+            codecIndicator.hidden = true;
+            codecIndicator.textContent = '';
+            codecIndicator.className = 'codec-badge';
         }
     }
 
@@ -438,6 +512,21 @@
                     return;
                 }
             }
+        }
+
+        // Ctrl+Tab → send Alt+Tab to remote (browser can't send native Alt+Tab)
+        if (event.ctrlKey && event.code === 'Tab') {
+            event.preventDefault();
+            event.stopPropagation();
+            if (isDown) {
+                sendKeyCombo([
+                    { code: 0x38, flags: 0 },         // Alt down
+                    { code: 0x0F, flags: 0 },         // Tab down
+                    { code: 0x0F, flags: KBD_FLAGS_RELEASE }, // Tab up
+                    { code: 0x38, flags: KBD_FLAGS_RELEASE }, // Alt up
+                ]);
+            }
+            return;
         }
 
         let scancode;
@@ -604,6 +693,8 @@
 
     function handleDisconnect(reason) {
         connected = false;
+        console.log('[CODEC] Session stats — H.264: ' + h264FrameCount + ', JPEG: ' + jpegFrameCount + ', PNG: ' + pngFrameCount);
+        resetCodecCounters();
         if (ws) {
             ws.close();
             ws = null;
@@ -649,7 +740,20 @@
             return;
         }
 
-        connectWebSocket(username, password, domain);
+        // Enter fullscreen before connecting if checkbox is checked
+        if (fullscreenConnectCb && fullscreenConnectCb.checked && document.documentElement.requestFullscreen) {
+            document.documentElement.requestFullscreen().then(function () {
+                // Small delay to let the browser update screen dimensions
+                setTimeout(function () {
+                    connectWebSocket(username, password, domain);
+                }, 200);
+            }).catch(function () {
+                // Fullscreen denied — connect anyway
+                connectWebSocket(username, password, domain);
+            });
+        } else {
+            connectWebSocket(username, password, domain);
+        }
     });
 
     // Disconnect button
@@ -678,7 +782,8 @@
     });
 
     qualitySlider.addEventListener('input', function () {
-        qualityValue.textContent = qualitySlider.value;
+        var q = parseInt(qualitySlider.value, 10);
+        qualityValue.textContent = q >= 95 ? q + ' (Lossless)' : q;
     });
 
     qualitySlider.addEventListener('change', function () {
