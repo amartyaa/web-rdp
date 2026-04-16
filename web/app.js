@@ -30,7 +30,7 @@
     const statusBar = document.getElementById('status-bar');
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
-    const resolutionSelect = document.getElementById('resolution-selector');
+    const resolutionText = document.getElementById('resolution-text');
     const disconnectBtn = document.getElementById('disconnect-btn');
     const fullscreenBtn = document.getElementById('fullscreen-btn');
     const fpsToggleBtn = document.getElementById('fps-toggle-btn');
@@ -46,10 +46,10 @@
     let remoteWidth = 1920;
     let remoteHeight = 1080;
 
-    // Credentials for auto-reconnect on resolution change
-    let currentUsername = '';
-    let currentPassword = '';
-    let currentDomain = '';
+    // FPS tracking
+    let frameCount = 0;
+    let fpsVisible = false;
+    let fpsInterval = null;
 
     // Fullscreen
     let isFullscreen = false;
@@ -149,21 +149,13 @@
 
         ws.onopen = function () {
             console.log('WebSocket connected');
-            // Resolution parsing
-            const resVal = resolutionSelect ? resolutionSelect.value : 'auto';
-            let reqW = 1920;
-            let reqH = 1080;
-            
-            if (resVal === 'auto') {
-                reqW = Math.floor(window.innerWidth / 2) * 2;
-                // roughly account for status bar height if visible and not fullscreen
-                const statusHeight = isFullscreen ? 0 : (statusBar ? statusBar.offsetHeight : 30);
-                reqH = Math.floor((window.innerHeight - statusHeight) / 2) * 2;
-            } else {
-                const parts = resVal.split('x');
-                reqW = parseInt(parts[0], 10);
-                reqH = parseInt(parts[1], 10);
-            }
+            // Use window dimensions — the canvas-wrapper is hidden at this point
+            // so its clientWidth/Height would be 0. Subtract estimated status bar.
+            var availW = window.innerWidth;
+            var availH = window.innerHeight - 30;
+            // Round to even for codec compatibility
+            var reqW = Math.floor(availW / 2) * 2;
+            var reqH = Math.floor(availH / 2) * 2;
 
             ws.send(JSON.stringify({
                 type: 'auth',
@@ -223,22 +215,7 @@
         // Set canvas to remote resolution
         canvas.width = remoteWidth;
         canvas.height = remoteHeight;
-        
-        // Sync select value if server forced a resolution not matching expectation
-        if (resolutionSelect.value !== 'auto') {
-            const expected = remoteWidth + 'x' + remoteHeight;
-            let optionExists = false;
-            for (let i=0; i<resolutionSelect.options.length; i++) {
-                if(resolutionSelect.options[i].value === expected) { optionExists = true; break;}
-            }
-            if(!optionExists) {
-                const opt = document.createElement('option');
-                opt.value = expected;
-                opt.innerHTML = remoteWidth + '×' + remoteHeight;
-                resolutionSelect.appendChild(opt);
-            }
-            resolutionSelect.value = expected;
-        }
+        resolutionText.textContent = remoteWidth + '×' + remoteHeight;
 
         // Initialize H.264 decoder if supported
         if (webCodecsSupported) {
@@ -274,6 +251,7 @@
         remoteHeight = height;
         canvas.width = remoteWidth;
         canvas.height = remoteHeight;
+        resolutionText.textContent = remoteWidth + '×' + remoteHeight;
     }
 
     // ========================================
@@ -318,37 +296,27 @@
     }
 
     // ========================================
-    // Frame Rendering (with rAF batching)
+    // Frame Rendering
     // ========================================
 
     function handleFrame(buffer) {
         frameCount++;
 
-        // Check header format: new 9-byte header with type, or legacy 8-byte
-        var headerSize, frameType;
-        var view = new DataView(buffer);
+        // Wire format: [1B type][2B x][2B y][2B w][2B h][payload] (9-byte header)
+        if (buffer.byteLength <= 9) return;
 
-        if (buffer.byteLength > 9) {
-            // New format: [1B type][2B x][2B y][2B w][2B h][payload]
-            frameType = view.getUint8(0);
-            headerSize = 9;
-            if (frameType !== FRAME_TYPE_JPEG && frameType !== FRAME_TYPE_H264) {
-                // Legacy 8-byte format (type byte looks like high byte of x coordinate)
-                frameType = FRAME_TYPE_JPEG;
-                headerSize = 8;
-            }
-        } else {
-            // Legacy 8-byte format
-            frameType = FRAME_TYPE_JPEG;
-            headerSize = 8;
-        }
+        var view = new DataView(buffer);
+        var frameType = view.getUint8(0);
+        var x = view.getUint16(1, true);
+        var y = view.getUint16(3, true);
+        var w = view.getUint16(5, true);
+        var h = view.getUint16(7, true);
 
         if (frameType === FRAME_TYPE_H264 && h264Decoder && h264Decoder.state === 'configured') {
-            // H.264 passthrough: decode via WebCodecs GPU
-            var h264Data = new Uint8Array(buffer, headerSize);
+            var h264Data = new Uint8Array(buffer, 9);
             try {
                 var chunk = new EncodedVideoChunk({
-                    type: 'key', // Treat all as keyframes for simplicity; real impl checks NAL type
+                    type: 'key',
                     timestamp: performance.now() * 1000,
                     data: h264Data
                 });
@@ -359,25 +327,15 @@
             return;
         }
 
-        // Direct image processing (no requestAnimationFrame batching to avoid stutter/tearing)
-        var offset = (headerSize === 9) ? 1 : 0;
-        var x = view.getUint16(offset, true);
-        var y = view.getUint16(offset + 2, true);
-        var w = view.getUint16(offset + 4, true);
-        var h = view.getUint16(offset + 6, true);
-        var jpegData = new Uint8Array(buffer, headerSize);
-
+        // JPEG path: decode and draw immediately (no rAF batching — it adds latency)
+        var jpegData = new Uint8Array(buffer, 9);
         var blob = new Blob([jpegData], { type: 'image/jpeg' });
-        var url = URL.createObjectURL(blob);
-        var img = new Image();
-        img.onload = function() {
-            ctx.drawImage(img, x, y, w, h);
-            URL.revokeObjectURL(url);
-        };
-        img.onerror = function() {
-            URL.revokeObjectURL(url);
-        }
-        img.src = url;
+        createImageBitmap(blob).then(function (bitmap) {
+            ctx.drawImage(bitmap, x, y, w, h);
+            bitmap.close();
+        }).catch(function (err) {
+            console.error('Frame decode error:', err);
+        });
     }
 
     // ========================================
@@ -589,11 +547,10 @@
             rdpScreen.hidden = true;
             loginScreen.hidden = false;
             loginScreen.classList.remove('hiding');
-            setLoading(false); // Prevent stuck spinner on disconnect
-            if (reason && reason !== 'reconnect') {
+            if (reason) {
                 showError('Disconnected: ' + reason);
             }
-        }, reason === 'reconnect' ? 0 : 1000);
+        }, 1000);
     }
 
     // ========================================
@@ -606,32 +563,18 @@
         hideError();
         setLoading(true);
 
-        currentUsername = usernameInput.value.trim();
-        currentPassword = passwordInput.value;
-        currentDomain = domainInput.value.trim();
+        const username = usernameInput.value.trim();
+        const password = passwordInput.value;
+        const domain = domainInput.value.trim();
 
-        if (!currentUsername || !currentPassword) {
+        if (!username || !password) {
             showError('Username and password are required');
             setLoading(false);
             return;
         }
 
-        connectWebSocket(currentUsername, currentPassword, currentDomain);
+        connectWebSocket(username, password, domain);
     });
-
-    // Resolution change dynamically
-    if (resolutionSelect) {
-        resolutionSelect.addEventListener('change', function() {
-            if (connected) {
-                handleDisconnect('reconnect');
-                // Brief delay to ensure disconnect completes then reconnect
-                setTimeout(function() {
-                     setLoading(true);
-                     connectWebSocket(currentUsername, currentPassword, currentDomain);
-                }, 100);
-            }
-        });
-    }
 
     // Disconnect button
     disconnectBtn.addEventListener('click', function () {

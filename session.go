@@ -68,6 +68,14 @@ func (s *Session) Run() {
 			return
 		}
 
+		// If session was closed (e.g. during auth), stop processing
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return
+		}
+
 		var msg ClientMessage
 		if err := json.Unmarshal(msgData, &msg); err != nil {
 			log.Printf("Invalid message format: %v", err)
@@ -127,7 +135,13 @@ func (s *Session) handleAuth(msg *ClientMessage) {
 
 	conn, err := rdp.Connect(params, s.frameCh,
 		func(width, height int) {
-			// RDP desktop ready callback
+			// RDP desktop ready callback — check if session is still alive
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
+				return
+			}
 			log.Printf("RDP connected: %dx%d", width, height)
 			s.sendJSON(ServerMessage{
 				Type:   "auth_ok",
@@ -154,7 +168,15 @@ func (s *Session) handleAuth(msg *ClientMessage) {
 		return
 	}
 
+	// Check again if session closed while we were connecting
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		go conn.Disconnect()
+		return
+	}
 	s.rdpConn = conn
+	s.mu.Unlock()
 
 	// Start frame relay goroutine
 	go s.relayFrames()
@@ -163,6 +185,12 @@ func (s *Session) handleAuth(msg *ClientMessage) {
 // relayFrames reads frames from the RDP frame channel and sends them as
 // binary WebSocket messages.
 func (s *Session) relayFrames() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("relayFrames recovered from panic: %v", r)
+		}
+	}()
+
 	for {
 		select {
 		case frame, ok := <-s.frameCh:

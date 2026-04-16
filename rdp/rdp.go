@@ -26,6 +26,13 @@ const (
 	FrameTypeH264 = 0x01
 )
 
+// Pool for JPEG encode buffers to reduce GC pressure
+var jpegBufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
+
 // Frame represents a dirty rectangle update encoded as JPEG or raw H.264.
 type Frame struct {
 	Type        uint8  // FrameTypeJPEG or FrameTypeH264
@@ -112,16 +119,6 @@ func (c *Connection) eventLoop() {
 	defer runtime.UnlockOSThread()
 
 	C.bridge_run_event_loop(c.ctx)
-
-	c.mu.Lock()
-	ctx := c.ctx
-	c.ctx = nil
-	c.mu.Unlock()
-
-	if ctx != nil {
-		C.bridge_free(ctx)
-	}
-	c.handle.Delete()
 }
 
 // Disconnect cleanly closes the RDP session.
@@ -136,7 +133,11 @@ func (c *Connection) Disconnect() {
 
 	if c.ctx != nil {
 		C.bridge_disconnect(c.ctx)
+		C.bridge_free(c.ctx)
+		c.ctx = nil
 	}
+
+	c.handle.Delete()
 }
 
 // SendKeyboard sends a keyboard event to the RDP session.
@@ -199,12 +200,19 @@ func goEndPaint(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 		}
 	}
 
-	// JPEG encode directly (sync.Pool reverted)
-	var buf bytes.Buffer
-	err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 65})
+	// JPEG encode using pooled buffer
+	buf := jpegBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	err := jpeg.Encode(buf, img, &jpeg.Options{Quality: 65})
 	if err != nil {
+		jpegBufPool.Put(buf)
 		return
 	}
+
+	// Copy from pooled buffer so we can return it immediately
+	jpegBytes := make([]byte, buf.Len())
+	copy(jpegBytes, buf.Bytes())
+	jpegBufPool.Put(buf)
 
 	// Non-blocking send to frame channel
 	frame := Frame{
@@ -213,7 +221,7 @@ func goEndPaint(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 		Y:    goY,
 		W:    goW,
 		H:    goH,
-		Data: buf.Bytes(),
+		Data: jpegBytes,
 	}
 
 	select {
