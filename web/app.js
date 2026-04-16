@@ -30,7 +30,7 @@
     const statusBar = document.getElementById('status-bar');
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
-    const resolutionText = document.getElementById('resolution-text');
+    const resolutionSelect = document.getElementById('resolution-selector');
     const disconnectBtn = document.getElementById('disconnect-btn');
     const fullscreenBtn = document.getElementById('fullscreen-btn');
     const fpsToggleBtn = document.getElementById('fps-toggle-btn');
@@ -46,18 +46,14 @@
     let remoteWidth = 1920;
     let remoteHeight = 1080;
 
-    // FPS tracking
-    let frameCount = 0;
-    let fpsVisible = false;
-    let fpsInterval = null;
+    // Credentials for auto-reconnect on resolution change
+    let currentUsername = '';
+    let currentPassword = '';
+    let currentDomain = '';
 
     // Fullscreen
     let isFullscreen = false;
     let toolbarTimeout = null;
-
-    // Frame batching (rAF)
-    let pendingFrames = [];
-    let rafId = null;
 
     // Mouse throttling
     let lastMouseSendTime = 0;
@@ -153,13 +149,21 @@
 
         ws.onopen = function () {
             console.log('WebSocket connected');
-            // Send the browser's available viewport dimensions so RDP matches
-            const wrapper = document.querySelector('.canvas-wrapper');
-            const availW = wrapper ? wrapper.clientWidth : window.innerWidth;
-            const availH = wrapper ? wrapper.clientHeight : (window.innerHeight - (statusBar ? statusBar.offsetHeight : 30));
-            // Round to even for codec compatibility
-            const reqW = Math.floor(availW / 2) * 2;
-            const reqH = Math.floor(availH / 2) * 2;
+            // Resolution parsing
+            const resVal = resolutionSelect ? resolutionSelect.value : 'auto';
+            let reqW = 1920;
+            let reqH = 1080;
+            
+            if (resVal === 'auto') {
+                reqW = Math.floor(window.innerWidth / 2) * 2;
+                // roughly account for status bar height if visible and not fullscreen
+                const statusHeight = isFullscreen ? 0 : (statusBar ? statusBar.offsetHeight : 30);
+                reqH = Math.floor((window.innerHeight - statusHeight) / 2) * 2;
+            } else {
+                const parts = resVal.split('x');
+                reqW = parseInt(parts[0], 10);
+                reqH = parseInt(parts[1], 10);
+            }
 
             ws.send(JSON.stringify({
                 type: 'auth',
@@ -219,7 +223,22 @@
         // Set canvas to remote resolution
         canvas.width = remoteWidth;
         canvas.height = remoteHeight;
-        resolutionText.textContent = remoteWidth + '×' + remoteHeight;
+        
+        // Sync select value if server forced a resolution not matching expectation
+        if (resolutionSelect.value !== 'auto') {
+            const expected = remoteWidth + 'x' + remoteHeight;
+            let optionExists = false;
+            for (let i=0; i<resolutionSelect.options.length; i++) {
+                if(resolutionSelect.options[i].value === expected) { optionExists = true; break;}
+            }
+            if(!optionExists) {
+                const opt = document.createElement('option');
+                opt.value = expected;
+                opt.innerHTML = remoteWidth + '×' + remoteHeight;
+                resolutionSelect.appendChild(opt);
+            }
+            resolutionSelect.value = expected;
+        }
 
         // Initialize H.264 decoder if supported
         if (webCodecsSupported) {
@@ -255,7 +274,6 @@
         remoteHeight = height;
         canvas.width = remoteWidth;
         canvas.height = remoteHeight;
-        resolutionText.textContent = remoteWidth + '×' + remoteHeight;
     }
 
     // ========================================
@@ -341,7 +359,7 @@
             return;
         }
 
-        // JPEG path: queue for rAF batch rendering
+        // Direct image processing (no requestAnimationFrame batching to avoid stutter/tearing)
         var offset = (headerSize === 9) ? 1 : 0;
         var x = view.getUint16(offset, true);
         var y = view.getUint16(offset + 2, true);
@@ -349,32 +367,17 @@
         var h = view.getUint16(offset + 6, true);
         var jpegData = new Uint8Array(buffer, headerSize);
 
-        pendingFrames.push({ x: x, y: y, w: w, h: h, jpeg: jpegData });
-
-        // Schedule rAF if not already pending
-        if (!rafId) {
-            rafId = requestAnimationFrame(flushFrames);
+        var blob = new Blob([jpegData], { type: 'image/jpeg' });
+        var url = URL.createObjectURL(blob);
+        var img = new Image();
+        img.onload = function() {
+            ctx.drawImage(img, x, y, w, h);
+            URL.revokeObjectURL(url);
+        };
+        img.onerror = function() {
+            URL.revokeObjectURL(url);
         }
-    }
-
-    function flushFrames() {
-        rafId = null;
-        var frames = pendingFrames;
-        pendingFrames = [];
-
-        for (var i = 0; i < frames.length; i++) {
-            var f = frames[i];
-            var blob = new Blob([f.jpeg], { type: 'image/jpeg' });
-            // Use IIFE to capture f in closure
-            (function(x, y, w, h) {
-                createImageBitmap(blob).then(function (bitmap) {
-                    ctx.drawImage(bitmap, x, y, w, h);
-                    bitmap.close();
-                }).catch(function (err) {
-                    console.error('Frame decode error:', err);
-                });
-            })(f.x, f.y, f.w, f.h);
-        }
+        img.src = url;
     }
 
     // ========================================
@@ -574,11 +577,6 @@
 
         cleanupH264Decoder();
         stopFpsCounter();
-        if (rafId) {
-            cancelAnimationFrame(rafId);
-            rafId = null;
-        }
-        pendingFrames = [];
 
         // Exit fullscreen if active
         if (document.fullscreenElement) {
@@ -591,10 +589,11 @@
             rdpScreen.hidden = true;
             loginScreen.hidden = false;
             loginScreen.classList.remove('hiding');
-            if (reason) {
+            setLoading(false); // Prevent stuck spinner on disconnect
+            if (reason && reason !== 'reconnect') {
                 showError('Disconnected: ' + reason);
             }
-        }, 1000);
+        }, reason === 'reconnect' ? 0 : 1000);
     }
 
     // ========================================
@@ -607,18 +606,32 @@
         hideError();
         setLoading(true);
 
-        const username = usernameInput.value.trim();
-        const password = passwordInput.value;
-        const domain = domainInput.value.trim();
+        currentUsername = usernameInput.value.trim();
+        currentPassword = passwordInput.value;
+        currentDomain = domainInput.value.trim();
 
-        if (!username || !password) {
+        if (!currentUsername || !currentPassword) {
             showError('Username and password are required');
             setLoading(false);
             return;
         }
 
-        connectWebSocket(username, password, domain);
+        connectWebSocket(currentUsername, currentPassword, currentDomain);
     });
+
+    // Resolution change dynamically
+    if (resolutionSelect) {
+        resolutionSelect.addEventListener('change', function() {
+            if (connected) {
+                handleDisconnect('reconnect');
+                // Brief delay to ensure disconnect completes then reconnect
+                setTimeout(function() {
+                     setLoading(true);
+                     connectWebSocket(currentUsername, currentPassword, currentDomain);
+                }, 100);
+            }
+        });
+    }
 
     // Disconnect button
     disconnectBtn.addEventListener('click', function () {
