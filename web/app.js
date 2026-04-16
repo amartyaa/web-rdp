@@ -36,6 +36,13 @@
     const fpsToggleBtn = document.getElementById('fps-toggle-btn');
     const fpsOverlay = document.getElementById('fps-overlay');
     const fpsText = document.getElementById('fps-text');
+    const qualityToggleBtn = document.getElementById('quality-toggle-btn');
+    const qualityPopup = document.getElementById('quality-popup');
+    const qualitySlider = document.getElementById('quality-slider');
+    const qualityValue = document.getElementById('quality-value');
+    const clipboardBtn = document.getElementById('clipboard-btn');
+    const altTabBtn = document.getElementById('alttab-btn');
+    const cadBtn = document.getElementById('cad-btn');
 
     // ========================================
     // State
@@ -454,6 +461,75 @@
             flags: flags
         }));
     }
+    // ========================================
+    // Special Key Combos & Text Input
+    // ========================================
+
+    // Send a sequence of key events with 30ms spacing
+    function sendKeyCombo(keys) {
+        if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+        keys.forEach(function (k, i) {
+            setTimeout(function () {
+                ws.send(JSON.stringify({ type: 'key', code: k.code, flags: k.flags }));
+            }, i * 30);
+        });
+    }
+
+    // Type text by sending each character as a Unicode keyboard event
+    // Uses KBDFLAGS_UNICODE (0x0004) which tells FreeRDP to use unicode input
+    function sendTextAsKeys(text) {
+        if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+        for (var i = 0; i < text.length; i++) {
+            var charCode = text.charCodeAt(i);
+            // Skip control characters except newline/tab
+            if (charCode < 32 && charCode !== 10 && charCode !== 13 && charCode !== 9) continue;
+            // Map newline to Enter scancode
+            if (charCode === 10 || charCode === 13) {
+                sendKeyCombo([
+                    { code: 0x1C, flags: 0 },
+                    { code: 0x1C, flags: KBD_FLAGS_RELEASE }
+                ]);
+                continue;
+            }
+            // For regular characters, find the scancode if we have it
+            // Otherwise skip — full unicode input requires FreeRDP unicode mode
+            var code = eventCodeFromChar(text[i]);
+            if (code) {
+                (function(c) {
+                    setTimeout(function () {
+                        var sc, fl;
+                        if (EXTENDED_KEYS.has(c)) {
+                            sc = EXTENDED_SCANCODE_MAP[c];
+                            fl = KBD_FLAGS_EXTENDED;
+                        } else {
+                            sc = SCANCODE_MAP[c];
+                            fl = 0;
+                        }
+                        if (sc !== undefined) {
+                            ws.send(JSON.stringify({ type: 'key', code: sc, flags: fl }));
+                            setTimeout(function() {
+                                ws.send(JSON.stringify({ type: 'key', code: sc, flags: fl | KBD_FLAGS_RELEASE }));
+                            }, 15);
+                        }
+                    }, i * 30);
+                })(code);
+            }
+        }
+    }
+
+    // Map ASCII character to event.code name
+    function eventCodeFromChar(ch) {
+        var c = ch.toLowerCase();
+        if (c >= 'a' && c <= 'z') return 'Key' + c.toUpperCase();
+        if (c >= '0' && c <= '9') return 'Digit' + c;
+        var map = {
+            ' ': 'Space', '-': 'Minus', '=': 'Equal', '[': 'BracketLeft',
+            ']': 'BracketRight', '\\': 'Backslash', ';': 'Semicolon',
+            "'": 'Quote', '`': 'Backquote', ',': 'Comma', '.': 'Period',
+            '/': 'Slash', '\t': 'Tab'
+        };
+        return map[ch] || null;
+    }
 
     // ========================================
     // Input Handling — Mouse (with throttling)
@@ -590,6 +666,79 @@
     // FPS toggle button
     fpsToggleBtn.addEventListener('click', function () {
         toggleFps();
+        canvas.focus();
+    });
+
+    // Quality slider toggle
+    qualityToggleBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var visible = !qualityPopup.hidden;
+        qualityPopup.hidden = visible;
+        qualityToggleBtn.classList.toggle('active', !visible);
+    });
+
+    qualitySlider.addEventListener('input', function () {
+        qualityValue.textContent = qualitySlider.value;
+    });
+
+    qualitySlider.addEventListener('change', function () {
+        var q = parseInt(qualitySlider.value, 10);
+        qualityValue.textContent = q;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'settings', quality: q }));
+        }
+    });
+
+    // Prevent slider interaction from stealing canvas focus
+    qualitySlider.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+
+    // Close quality popup on outside click
+    document.addEventListener('click', function (e) {
+        if (!qualityPopup.hidden && !qualityPopup.contains(e.target) && e.target !== qualityToggleBtn) {
+            qualityPopup.hidden = true;
+            qualityToggleBtn.classList.remove('active');
+        }
+    });
+
+    // Clipboard paste button
+    clipboardBtn.addEventListener('click', function () {
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+            console.warn('Clipboard API not available');
+            canvas.focus();
+            return;
+        }
+        navigator.clipboard.readText().then(function (text) {
+            if (text && connected) {
+                sendTextAsKeys(text);
+            }
+            canvas.focus();
+        }).catch(function (err) {
+            console.warn('Clipboard read failed:', err);
+            canvas.focus();
+        });
+    });
+
+    // Alt+Tab button
+    altTabBtn.addEventListener('click', function () {
+        sendKeyCombo([
+            { code: 0x38, flags: 0 },         // Alt down
+            { code: 0x0F, flags: 0 },         // Tab down
+            { code: 0x0F, flags: KBD_FLAGS_RELEASE }, // Tab up
+            { code: 0x38, flags: KBD_FLAGS_RELEASE }, // Alt up
+        ]);
+        canvas.focus();
+    });
+
+    // Ctrl+Alt+Del button
+    cadBtn.addEventListener('click', function () {
+        sendKeyCombo([
+            { code: 0x1D, flags: 0 },         // Ctrl down
+            { code: 0x38, flags: 0 },         // Alt down
+            { code: 0x53, flags: KBD_FLAGS_EXTENDED },              // Del down (extended)
+            { code: 0x53, flags: KBD_FLAGS_RELEASE | KBD_FLAGS_EXTENDED }, // Del up
+            { code: 0x38, flags: KBD_FLAGS_RELEASE }, // Alt up
+            { code: 0x1D, flags: KBD_FLAGS_RELEASE }, // Ctrl up
+        ]);
         canvas.focus();
     });
 

@@ -25,6 +25,10 @@ type ClientMessage struct {
 	// Mouse
 	X uint16 `json:"x,omitempty"`
 	Y uint16 `json:"y,omitempty"`
+	// Settings
+	Quality int `json:"quality,omitempty"` // JPEG quality 1-100
+	// Clipboard
+	Text string `json:"text,omitempty"`
 }
 
 // ServerMessage represents a JSON message sent from server to browser.
@@ -51,7 +55,7 @@ func NewSession(conn *websocket.Conn) *Session {
 	return &Session{
 		conn:    conn,
 		done:    make(chan struct{}),
-		frameCh: make(chan rdp.Frame, 30), // buffer up to 30 frames
+		frameCh: make(chan rdp.Frame, 10), // buffer up to 10 frames
 	}
 }
 
@@ -89,6 +93,8 @@ func (s *Session) Run() {
 			s.handleKey(&msg)
 		case "mouse":
 			s.handleMouse(&msg)
+		case "settings":
+			s.handleSettings(&msg)
 		default:
 			log.Printf("Unknown message type: %s", msg.Type)
 		}
@@ -201,6 +207,13 @@ func (s *Session) relayFrames() {
 		case <-s.done:
 			return
 		}
+	}
+}
+
+func (s *Session) handleSettings(msg *ClientMessage) {
+	if msg.Quality > 0 && s.rdpConn != nil {
+		s.rdpConn.SetJPEGQuality(msg.Quality)
+		log.Printf("JPEG quality set to %d", msg.Quality)
 	}
 }
 

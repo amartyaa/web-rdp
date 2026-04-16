@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/cgo"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -33,6 +34,15 @@ var jpegBufPool = sync.Pool{
 	},
 }
 
+// Pool for pixel conversion buffers (avoids allocating W*H*4 bytes per frame)
+var pixelBufPool = sync.Pool{
+	New: func() interface{} {
+		// Start with a reasonable default; will grow as needed
+		b := make([]byte, 0, 256*256*4)
+		return &b
+	},
+}
+
 // Frame represents a dirty rectangle update encoded as JPEG or raw H.264.
 type Frame struct {
 	Type        uint8  // FrameTypeJPEG or FrameTypeH264
@@ -46,10 +56,11 @@ type Connection struct {
 	handle  cgo.Handle
 	frameCh chan Frame
 
-	mu       sync.Mutex
-	closed   bool
-	onReady  func(width, height int)
-	onClosed func(errCode int)
+	mu          sync.Mutex
+	closed      bool
+	onReady     func(width, height int)
+	onClosed    func(errCode int)
+	jpegQuality atomic.Int32 // JPEG quality 1-100
 }
 
 // ConnectParams holds the parameters for establishing an RDP connection.
@@ -75,6 +86,7 @@ func Connect(params ConnectParams, frameCh chan Frame, onReady func(int, int), o
 		onReady:  onReady,
 		onClosed: onClosed,
 	}
+	conn.jpegQuality.Store(75) // Default quality
 
 	conn.handle = cgo.NewHandle(conn)
 
@@ -160,6 +172,17 @@ func (c *Connection) SendMouse(flags, x, y uint16) {
 	C.bridge_send_mouse(c.ctx, C.uint16_t(flags), C.uint16_t(x), C.uint16_t(y))
 }
 
+// SetJPEGQuality sets the JPEG encoding quality (1-100). Higher = better quality, more bandwidth.
+func (c *Connection) SetJPEGQuality(quality int) {
+	if quality < 1 {
+		quality = 1
+	}
+	if quality > 100 {
+		quality = 100
+	}
+	c.jpegQuality.Store(int32(quality))
+}
+
 // ============================================
 // Exported callbacks called from C
 // ============================================
@@ -183,36 +206,59 @@ func goEndPaint(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 	// Extract dirty rectangle from the BGRA32 framebuffer
 	fullBuffer := unsafe.Slice((*byte)(unsafe.Pointer(data)), int(dataLen))
 
-	// Create an RGBA image from the dirty rectangle
-	// FreeRDP BGRA32 layout: B, G, R, A per pixel
-	img := image.NewRGBA(image.Rect(0, 0, goW, goH))
+	// Get a reusable pixel buffer from pool
+	needed := goW * goH * 4
+	pbufPtr := pixelBufPool.Get().(*[]byte)
+	pbuf := *pbufPtr
+	if cap(pbuf) < needed {
+		pbuf = make([]byte, needed)
+	} else {
+		pbuf = pbuf[:needed]
+	}
+
+	// BGRA → RGBA conversion into pooled buffer
 	for row := 0; row < goH; row++ {
 		srcOffset := (goY+row)*goStride + goX*4
 		dstOffset := row * goW * 4
 		for col := 0; col < goW; col++ {
 			si := srcOffset + col*4
 			di := dstOffset + col*4
-			// BGRA → RGBA
-			img.Pix[di+0] = fullBuffer[si+2] // R
-			img.Pix[di+1] = fullBuffer[si+1] // G
-			img.Pix[di+2] = fullBuffer[si+0] // B
-			img.Pix[di+3] = fullBuffer[si+3] // A
+			pbuf[di+0] = fullBuffer[si+2] // R
+			pbuf[di+1] = fullBuffer[si+1] // G
+			pbuf[di+2] = fullBuffer[si+0] // B
+			pbuf[di+3] = 0xFF             // A (opaque, avoid copying alpha)
 		}
 	}
 
+	// Wrap pooled buffer as image (no allocation)
+	img := &image.RGBA{
+		Pix:    pbuf,
+		Stride: goW * 4,
+		Rect:   image.Rect(0, 0, goW, goH),
+	}
+
 	// JPEG encode using pooled buffer
-	buf := jpegBufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	err := jpeg.Encode(buf, img, &jpeg.Options{Quality: 65})
+	quality := int(conn.jpegQuality.Load())
+	if quality < 1 || quality > 100 {
+		quality = 75
+	}
+	jbuf := jpegBufPool.Get().(*bytes.Buffer)
+	jbuf.Reset()
+	err := jpeg.Encode(jbuf, img, &jpeg.Options{Quality: quality})
+
+	// Return pixel buffer to pool immediately
+	*pbufPtr = pbuf
+	pixelBufPool.Put(pbufPtr)
+
 	if err != nil {
-		jpegBufPool.Put(buf)
+		jpegBufPool.Put(jbuf)
 		return
 	}
 
 	// Copy from pooled buffer so we can return it immediately
-	jpegBytes := make([]byte, buf.Len())
-	copy(jpegBytes, buf.Bytes())
-	jpegBufPool.Put(buf)
+	jpegBytes := make([]byte, jbuf.Len())
+	copy(jpegBytes, jbuf.Bytes())
+	jpegBufPool.Put(jbuf)
 
 	// Non-blocking send to frame channel
 	frame := Frame{
