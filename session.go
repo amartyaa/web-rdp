@@ -55,7 +55,7 @@ func NewSession(conn *websocket.Conn) *Session {
 	return &Session{
 		conn:    conn,
 		done:    make(chan struct{}),
-		frameCh: make(chan rdp.Frame, 10), // buffer up to 10 frames
+		frameCh: make(chan rdp.Frame, 2), // buffer up to 2 frames for tight backpressure
 	}
 }
 
@@ -95,6 +95,8 @@ func (s *Session) Run() {
 			s.handleMouse(&msg)
 		case "settings":
 			s.handleSettings(&msg)
+		case "clipboard":
+			s.handleClipboard(&msg)
 		default:
 			log.Printf("Unknown message type: %s", msg.Type)
 		}
@@ -222,18 +224,16 @@ func (s *Session) handleSettings(msg *ClientMessage) {
 // type: 0x00 = JPEG, 0x01 = H.264 NAL unit
 // All uint16 values in little-endian.
 func (s *Session) sendFrame(frame rdp.Frame) {
-	header := make([]byte, 9)
-	header[0] = frame.Type
-	binary.LittleEndian.PutUint16(header[1:3], uint16(frame.X))
-	binary.LittleEndian.PutUint16(header[3:5], uint16(frame.Y))
-	binary.LittleEndian.PutUint16(header[5:7], uint16(frame.W))
-	binary.LittleEndian.PutUint16(header[7:9], uint16(frame.H))
+	// Write header + payload in a single allocation
+	msg := make([]byte, 9+len(frame.Data))
+	msg[0] = frame.Type
+	binary.LittleEndian.PutUint16(msg[1:3], uint16(frame.X))
+	binary.LittleEndian.PutUint16(msg[3:5], uint16(frame.Y))
+	binary.LittleEndian.PutUint16(msg[5:7], uint16(frame.W))
+	binary.LittleEndian.PutUint16(msg[7:9], uint16(frame.H))
+	copy(msg[9:], frame.Data)
 
-	data := make([]byte, 9+len(frame.Data))
-	copy(data[0:9], header)
-	copy(data[9:], frame.Data)
-
-	s.sendBinary(data)
+	s.sendBinary(msg)
 }
 
 func (s *Session) handleKey(msg *ClientMessage) {
@@ -241,6 +241,30 @@ func (s *Session) handleKey(msg *ClientMessage) {
 		return
 	}
 	s.rdpConn.SendKeyboard(msg.Flags, msg.Code)
+}
+
+func (s *Session) handleClipboard(msg *ClientMessage) {
+	if s.rdpConn == nil || msg.Text == "" {
+		return
+	}
+	
+	// FreeRDP KBD_FLAGS_UNICODE is 0x0400, KBD_FLAGS_RELEASE is 0x8000
+	const (
+		KBD_FLAGS_UNICODE = 0x0400
+		KBD_FLAGS_RELEASE = 0x8000
+	)
+	
+	for _, r := range msg.Text {
+		if r == '\n' || r == '\r' {
+			// Send Enter scancode for newlines
+			s.rdpConn.SendKeyboard(0, 0x1C)
+			s.rdpConn.SendKeyboard(KBD_FLAGS_RELEASE, 0x1C)
+			continue
+		}
+		
+		s.rdpConn.SendUnicodeKey(KBD_FLAGS_UNICODE, uint16(r))
+		s.rdpConn.SendUnicodeKey(KBD_FLAGS_UNICODE|KBD_FLAGS_RELEASE, uint16(r))
+	}
 }
 
 func (s *Session) handleMouse(msg *ClientMessage) {

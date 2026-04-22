@@ -326,6 +326,8 @@
     // Frame Rendering
     // ========================================
 
+    var decodePromise = Promise.resolve();
+
     function handleFrame(buffer) {
         frameCount++;
 
@@ -378,11 +380,14 @@
             }
         }
 
-        // Image path (JPEG or PNG): decode and draw immediately
+        // Image path (JPEG or PNG): decode and draw sequentially
         var imageData = new Uint8Array(buffer, 9);
         var mimeType = (frameType === FRAME_TYPE_PNG) ? 'image/png' : 'image/jpeg';
-        var blob = new Blob([imageData], { type: mimeType });
-        createImageBitmap(blob).then(function (bitmap) {
+        
+        decodePromise = decodePromise.then(function() {
+            var blob = new Blob([imageData], { type: mimeType });
+            return createImageBitmap(blob);
+        }).then(function (bitmap) {
             ctx.drawImage(bitmap, x, y, w, h);
             bitmap.close();
         }).catch(function (err) {
@@ -564,60 +569,10 @@
         });
     }
 
-    // Type text by sending each character as a Unicode keyboard event
-    // Uses KBDFLAGS_UNICODE (0x0004) which tells FreeRDP to use unicode input
-    function sendTextAsKeys(text) {
+    // Send raw text to the server to be injected via Unicode keyboard events
+    function sendUnicodeText(text) {
         if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
-        for (var i = 0; i < text.length; i++) {
-            var charCode = text.charCodeAt(i);
-            // Skip control characters except newline/tab
-            if (charCode < 32 && charCode !== 10 && charCode !== 13 && charCode !== 9) continue;
-            // Map newline to Enter scancode
-            if (charCode === 10 || charCode === 13) {
-                sendKeyCombo([
-                    { code: 0x1C, flags: 0 },
-                    { code: 0x1C, flags: KBD_FLAGS_RELEASE }
-                ]);
-                continue;
-            }
-            // For regular characters, find the scancode if we have it
-            // Otherwise skip — full unicode input requires FreeRDP unicode mode
-            var code = eventCodeFromChar(text[i]);
-            if (code) {
-                (function(c) {
-                    setTimeout(function () {
-                        var sc, fl;
-                        if (EXTENDED_KEYS.has(c)) {
-                            sc = EXTENDED_SCANCODE_MAP[c];
-                            fl = KBD_FLAGS_EXTENDED;
-                        } else {
-                            sc = SCANCODE_MAP[c];
-                            fl = 0;
-                        }
-                        if (sc !== undefined) {
-                            ws.send(JSON.stringify({ type: 'key', code: sc, flags: fl }));
-                            setTimeout(function() {
-                                ws.send(JSON.stringify({ type: 'key', code: sc, flags: fl | KBD_FLAGS_RELEASE }));
-                            }, 15);
-                        }
-                    }, i * 30);
-                })(code);
-            }
-        }
-    }
-
-    // Map ASCII character to event.code name
-    function eventCodeFromChar(ch) {
-        var c = ch.toLowerCase();
-        if (c >= 'a' && c <= 'z') return 'Key' + c.toUpperCase();
-        if (c >= '0' && c <= '9') return 'Digit' + c;
-        var map = {
-            ' ': 'Space', '-': 'Minus', '=': 'Equal', '[': 'BracketLeft',
-            ']': 'BracketRight', '\\': 'Backslash', ';': 'Semicolon',
-            "'": 'Quote', '`': 'Backquote', ',': 'Comma', '.': 'Period',
-            '/': 'Slash', '\t': 'Tab'
-        };
-        return map[ch] || null;
+        ws.send(JSON.stringify({ type: 'clipboard', text: text }));
     }
 
     // ========================================
@@ -814,13 +769,23 @@
         }
         navigator.clipboard.readText().then(function (text) {
             if (text && connected) {
-                sendTextAsKeys(text);
+                sendUnicodeText(text);
             }
             canvas.focus();
         }).catch(function (err) {
             console.warn('Clipboard read failed:', err);
             canvas.focus();
         });
+    });
+
+    // Global paste event (Ctrl+V)
+    document.addEventListener('paste', function (e) {
+        if (!connected) return;
+        var text = (e.clipboardData || window.clipboardData).getData('text/plain');
+        if (text) {
+            e.preventDefault();
+            sendUnicodeText(text);
+        }
     });
 
     // Alt+Tab button

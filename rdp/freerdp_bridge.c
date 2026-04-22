@@ -543,6 +543,13 @@ void bridge_send_keyboard(rdpContext* context, uint16_t flags, uint16_t code)
     freerdp_input_send_keyboard_event(context->input, flags, code);
 }
 
+void bridge_send_unicode_keyboard(rdpContext* context, uint16_t flags, uint16_t code)
+{
+    if (!context || !context->input)
+        return;
+    freerdp_input_send_unicode_keyboard_event(context->input, flags, code);
+}
+
 void bridge_send_mouse(rdpContext* context, uint16_t flags, uint16_t x, uint16_t y)
 {
     if (!context || !context->input)

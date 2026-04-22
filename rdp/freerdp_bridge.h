@@ -67,6 +67,11 @@ void bridge_free(rdpContext* context);
 void bridge_send_keyboard(rdpContext* context, uint16_t flags, uint16_t code);
 
 /*
+ * bridge_send_unicode_keyboard: Forwards a unicode keyboard event to the RDP session.
+ */
+void bridge_send_unicode_keyboard(rdpContext* context, uint16_t flags, uint16_t code);
+
+/*
  * bridge_send_mouse: Forwards a mouse event to the RDP session.
  */
 void bridge_send_mouse(rdpContext* context, uint16_t flags, uint16_t x, uint16_t y);

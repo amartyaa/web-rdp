@@ -166,6 +166,16 @@ func (c *Connection) SendKeyboard(flags, code uint16) {
 	C.bridge_send_keyboard(c.ctx, C.uint16_t(flags), C.uint16_t(code))
 }
 
+// SendUnicodeKey sends a unicode keyboard event to the RDP session.
+func (c *Connection) SendUnicodeKey(flags, code uint16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.ctx == nil {
+		return
+	}
+	C.bridge_send_unicode_keyboard(c.ctx, C.uint16_t(flags), C.uint16_t(code))
+}
+
 // SendMouse sends a mouse event to the RDP session.
 func (c *Connection) SendMouse(flags, x, y uint16) {
 	c.mu.Lock()
@@ -220,17 +230,14 @@ func goEndPaint(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 		pbuf = pbuf[:needed]
 	}
 
-	// BGRA → RGBA conversion into pooled buffer
+	// BGRA → RGBA conversion into pooled buffer (fast path)
 	for row := 0; row < goH; row++ {
-		srcOffset := (goY+row)*goStride + goX*4
-		dstOffset := row * goW * 4
-		for col := 0; col < goW; col++ {
-			si := srcOffset + col*4
-			di := dstOffset + col*4
-			pbuf[di+0] = fullBuffer[si+2] // R
-			pbuf[di+1] = fullBuffer[si+1] // G
-			pbuf[di+2] = fullBuffer[si+0] // B
-			pbuf[di+3] = 0xFF             // A (opaque, avoid copying alpha)
+		srcOff := (goY+row)*goStride + goX*4
+		dstOff := row * goW * 4
+		copy(pbuf[dstOff:dstOff+goW*4], fullBuffer[srcOff:srcOff+goW*4])
+		// In-place B↔R swap (bytes 0 and 2 of each pixel)
+		for i := dstOff; i < dstOff+goW*4; i += 4 {
+			pbuf[i], pbuf[i+2] = pbuf[i+2], pbuf[i]
 		}
 	}
 
@@ -287,11 +294,8 @@ func goEndPaint(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 		Data: encoded,
 	}
 
-	select {
-	case conn.frameCh <- frame:
-	default:
-		// Drop frame if channel is full (backpressure)
-	}
+	// Blocking send to frame channel (creates backpressure)
+	conn.frameCh <- frame
 }
 
 //export goH264Frame
@@ -325,11 +329,8 @@ func goH264Frame(handle C.uintptr_t, data *C.uint8_t, dataLen C.int,
 		Data: nalData,
 	}
 
-	select {
-	case conn.frameCh <- frame:
-	default:
-		// Drop frame if channel is full (backpressure)
-	}
+	// Blocking send to frame channel (creates backpressure)
+	conn.frameCh <- frame
 }
 
 //export goOnReady
