@@ -1,0 +1,8 @@
+{
+    "go.toolsEnvVars": {
+        "CGO_ENABLED": "1",
+        "CC": "C:\\msys64\\ucrt64\\bin\\gcc.exe",
+        "PKG_CONFIG": "C:\\msys64\\ucrt64\\bin\\pkg-config.exe",
+        "PATH": "C:\\msys64\\ucrt64\\bin;${env:PATH}"
+    }
+}
