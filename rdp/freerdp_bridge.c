@@ -442,12 +442,14 @@ rdpContext* bridge_connect(BridgeConnParams* params)
     if (!freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32))
         goto fail;
 
-    /* Security: TLS-only, no NLA */
-    if (!freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE))
+    /* Security: Enable NLA and standard protocols so FreeRDP can negotiate */
+    if (!freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE))
         goto fail;
     if (!freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE))
         goto fail;
     if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE))
+        goto fail;
+    if (!freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE))
         goto fail;
 
     /* Performance flags for streaming */
