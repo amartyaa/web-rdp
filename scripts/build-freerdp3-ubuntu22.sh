@@ -38,7 +38,9 @@ sudo apt-get install -y \
     libasound2-dev \
     libusb-1.0-0-dev \
     libpcsclite-dev \
-    libsystemd-dev
+    libsystemd-dev \
+    libcjson-dev \
+    libfuse3-dev
 
 echo "==> Downloading FreeRDP v${FREERDP_VERSION}..."
 WORKDIR=$(mktemp -d)
@@ -57,7 +59,10 @@ cmake -B build \
     -DWITH_WAYLAND=OFF \
     -DWITH_SERVER=OFF \
     -DWITH_PROXY=OFF \
-    -DWITH_SHADOW=OFF
+    -DWITH_SHADOW=OFF \
+    -DWITH_PCSC=OFF \
+    -DWITH_PKCS11=OFF \
+    -DWITH_MANPAGES=OFF
 
 echo "==> Compiling FreeRDP (this may take a few minutes)..."
 cmake --build build -j"$(nproc)"
