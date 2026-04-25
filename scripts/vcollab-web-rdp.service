@@ -1,0 +1,30 @@
+[Unit]
+Description=VCollab Web RDP Client
+Documentation=https://github.com/VFGroup-ITInfraSWEngineering/vcollab-web-rdp
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/vcollab-web-rdp/vcollab-web-rdp --listen :8080 --base-path /
+WorkingDirectory=/opt/vcollab-web-rdp
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vcollab-web-rdp
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/
+ReadWritePaths=/opt/vcollab-web-rdp
+
+# Environment (override via /etc/default/vcollab-web-rdp or drop-in)
+EnvironmentFile=-/etc/default/vcollab-web-rdp
+
+# Set LD_LIBRARY_PATH so the bundled FreeRDP .so files are found
+Environment=LD_LIBRARY_PATH=/opt/vcollab-web-rdp/lib
+
+[Install]
+WantedBy=multi-user.target

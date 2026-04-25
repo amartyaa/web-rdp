@@ -46,7 +46,7 @@ echo ""
 export CGO_ENABLED=1
 
 echo "==> Building vcollab-web-rdp ..."
-go build -o vcollab-web-rdp .
+go build -buildvcs=false -o vcollab-web-rdp .
 echo "    Build successful."
 echo ""
 
@@ -56,6 +56,13 @@ rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/lib"
 
 cp vcollab-web-rdp "$OUTPUT_DIR/"
+
+# Bundle systemd service file
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/vcollab-web-rdp.service" ]; then
+    cp "$SCRIPT_DIR/vcollab-web-rdp.service" "$OUTPUT_DIR/"
+    echo "    Bundled systemd service file"
+fi
 
 # ── Discover and copy runtime shared libraries ──────────────────────────────
 
