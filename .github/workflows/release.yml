@@ -7,7 +7,7 @@ on:
 
 env:
   FREERDP_VERSION: "3.5.1"
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.25.6"
 
 jobs:
   build-linux:
@@ -47,7 +47,7 @@ jobs:
 
       - name: Cache FreeRDP Build
         id: cache-freerdp
-        uses: actions/cache@v6
+        uses: actions/cache@v5
         with:
           path: /usr/local
           key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu2004-v2
@@ -155,6 +155,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create ${{ github.ref_name }} \
+            --repo ${{ github.repository }} \
             vcollab-web-rdp-linux.zip \
             vcollab-web-rdp-windows.zip \
             --title "Release ${{ github.ref_name }}" \
