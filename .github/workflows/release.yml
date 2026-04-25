@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FREERDP_VERSION: "3.5.1"
+  GO_VERSION: "1.22"
+
+jobs:
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+    steps:
+      - name: Install Base Dependencies
+        run: |
+          apt-get update
+          apt-get install -y sudo git curl tar wget zip ca-certificates software-properties-common
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install Build Dependencies
+        run: |
+          apt-get install -y \
+            build-essential cmake pkg-config \
+            libssl-dev libx11-dev libxext-dev \
+            libxcursor-dev libxinerama-dev libxi-dev \
+            libxdamage-dev libxrandr-dev libxv-dev \
+            libxkbfile-dev libjpeg-dev libpng-dev \
+            libavutil-dev libavcodec-dev libswscale-dev libswresample-dev \
+            libcairo2-dev libcups2-dev libpulse-dev \
+            libasound2-dev libusb-1.0-0-dev \
+            libpcsclite-dev libsystemd-dev libcjson-dev \
+            libfuse3-dev liburiparser-dev libkrb5-dev libicu-dev zlib1g-dev
+
+      - name: Cache FreeRDP Build
+        id: cache-freerdp
+        uses: actions/cache@v4
+        with:
+          path: /usr/local
+          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu2004-v2
+
+      - name: Build FreeRDP from Source
+        if: steps.cache-freerdp.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/FreeRDP/FreeRDP/releases/download/${FREERDP_VERSION}/freerdp-${FREERDP_VERSION}.tar.gz
+          tar -xf freerdp-${FREERDP_VERSION}.tar.gz
+          cd freerdp-${FREERDP_VERSION}
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DWITH_WAYLAND=OFF \
+            -DWITH_SERVER=OFF \
+            -DWITH_PROXY=OFF \
+            -DWITH_SHADOW=OFF \
+            -DWITH_PCSC=OFF \
+            -DWITH_PKCS11=OFF \
+            -DWITH_MANPAGES=OFF \
+            -DWITH_WEBVIEW=OFF \
+            -DWITH_SDL=OFF
+          cmake --build build -j$(nproc)
+          cmake --install build
+
+      - name: Refresh Linker Cache
+        run: ldconfig
+
+      - name: Build VCollab Web RDP
+        run: |
+          chmod +x ./scripts/build-linux.sh
+          ./scripts/build-linux.sh dist/linux
+
+      - name: Archive Artifacts
+        run: |
+          cd dist/linux
+          zip -r ../../vcollab-web-rdp-linux.zip .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: vcollab-web-rdp-linux.zip
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-freerdp
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build VCollab Web RDP
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: ./scripts/build-windows.ps1
+        shell: powershell
+
+      - name: Archive Artifacts
+        run: |
+          cd dist/windows
+          Compress-Archive -Path * -DestinationPath ../../vcollab-web-rdp-windows.zip
+        shell: powershell
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: vcollab-web-rdp-windows.zip
+
+  create-release:
+    name: Create Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-build
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            vcollab-web-rdp-linux.zip
+            vcollab-web-rdp-windows.zip
+          generate_release_notes: true

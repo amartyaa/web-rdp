@@ -13,7 +13,11 @@ param(
     [string]$OutputDir = "dist\windows"
 )
 
-$MSYS2_ROOT = "C:\msys64"
+if ($env:MSYS2_ROOT) {
+    $MSYS2_ROOT = $env:MSYS2_ROOT
+} else {
+    $MSYS2_ROOT = "C:\msys64"
+}
 $UCRT64_BIN = "$MSYS2_ROOT\ucrt64\bin"
 
 if (-not (Test-Path "$UCRT64_BIN\gcc.exe")) {
@@ -156,3 +160,5 @@ Write-Host ""
 Write-Host "    To run:" -ForegroundColor Gray
 Write-Host "    cd $OutputDir" -ForegroundColor Gray
 Write-Host "    .\vcollab-web-rdp.exe --listen :8080" -ForegroundColor Gray
+
+exit 0
